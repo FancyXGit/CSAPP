@@ -230,7 +230,12 @@ int conditional(int x, int y, int z)
  */
 int isLessOrEqual(int x, int y)
 {
-  return 2;
+  int neagtive_x = ~x + 1;
+  int y_sub_x = y + neagtive_x;
+  int top_sub = y_sub_x >> 31;
+  // if top_sub = 1111... y - x < 0
+  // if top_sub = 0000... y - x >= 0
+  return !top_sub;
 }
 // 4
 /*
@@ -243,7 +248,7 @@ int isLessOrEqual(int x, int y)
  */
 int logicalNeg(int x)
 {
-  return 2;
+  return ~((x | (~x + 1)) >> 31) & 1;
 }
 /* howManyBits - return the minimum number of bits required to represent x in
  *             two's complement
@@ -259,7 +264,73 @@ int logicalNeg(int x)
  */
 int howManyBits(int x)
 {
-  return 0;
+  // n bits can represent from -2^n to 2^n - 1
+  int res = 0;
+  // is_positive get 1111... when x >= 0 and 0000... when x < 0
+  int is_positive = ~(x >> 31);
+  // 1111 ... 1011 -> 1011 requires 4 bits
+  // positived 0000 ... 0100 -> 0100 requires 4 bits
+  // original positive number 0000 ... 0111 -> 0111 requires 4 bits
+  // so negative can transform to positive with required bits stay the same
+  int positived_x = (is_positive & x) + (~is_positive & (~x));
+  // set default 16
+  int curr_pos = 16;
+  // stage 16 bit
+  int bits_16 = positived_x >> curr_pos;
+  // declaration for old C
+  int bits_8;
+  int if_bits_8;
+  int bits_4;
+  int if_bits_4;
+  int bits_2;
+  int if_bits_2;
+  int bit_1;
+  int if_bit_1;
+
+  int is_zero;
+  int is_minus_one;
+  int special;
+
+  // be 1111 ... if bits_16 contains 1
+  int if_bits_16 = ~(!!bits_16) + 1;
+  // if 16-31 contains 1
+  // curr_pos add 8 (be 24)
+  // check 24 - 31 (top_8 of top_bits_16)
+  // res add 16
+  // else
+  // curr_pos sub 8 (be 8)
+  // check 8 - 15 (top_8 of lower_bits_16)
+  curr_pos = ((curr_pos + 8) & if_bits_16) + ((curr_pos + ~8 + 1) & (~if_bits_16));
+  bits_8 = positived_x >> curr_pos & 255;
+  res += if_bits_16 & 16;
+  // stage 8 bit
+  if_bits_8 = ~(!!bits_8) + 1;
+  curr_pos = ((curr_pos + 4) & if_bits_8) + ((curr_pos + ~4 + 1) & (~if_bits_8));
+  bits_4 = positived_x >> curr_pos & 15;
+  res += if_bits_8 & 8;
+  // stage 4 bit
+  if_bits_4 = ~(!!bits_4) + 1;
+  curr_pos = ((curr_pos + 2) & if_bits_4) + ((curr_pos + ~2 + 1) & (~if_bits_4));
+  bits_2 = positived_x >> curr_pos & 3;
+  res += if_bits_4 & 4;
+  // stage 2 bit
+  if_bits_2 = ~(!!bits_2) + 1;
+  curr_pos = ((curr_pos + 1) & if_bits_2) + ((curr_pos + ~1 + 1) & (~if_bits_2));
+  bit_1 = positived_x >> curr_pos & 1;
+  res += if_bits_2 & 2;
+  // stage 1 bit
+  if_bit_1 = ~(!!bit_1) + 1;
+  res += if_bit_1 & 1;
+  // final
+  // magic number
+  res += 2;
+
+  // handle 0 and -1
+  is_zero = !x;
+  is_minus_one = !~x;
+  special = ~(is_zero | is_minus_one) + 1;
+  res = (res & (~special)) + (1 & special);
+  return res;
 }
 // float
 /*
@@ -275,7 +346,45 @@ int howManyBits(int x)
  */
 unsigned floatScale2(unsigned uf)
 {
-  return 2;
+  int s = uf >> 31 & 1;
+  int e = uf >> 23 & 0xFF;
+  int m = uf & 0x7FFFFF;
+  // de-normalized (including 0 and -0)
+  if (e == 0)
+  {
+    int m_res = m + m;
+    int carry_flag = m_res >> 23;
+    // turn to normalized
+    if (carry_flag)
+    {
+      e = 1;
+      m = m_res & 0x7FFFFF;
+    }
+    // not turn
+    else
+    {
+      m = m_res;
+    }
+  }
+  // normalized
+  else if (e >= 1 && e <= 254)
+  {
+    // turn inf
+    if (e == 254)
+    {
+      m = 0;
+      e = 255;
+    }
+    // not turn
+    else
+    {
+      e += 1;
+    }
+  }
+  // inf and NaN stay the same
+  // no worry
+
+  return (s << 31) | (e << 23) | m;
 }
 /*
  * floatFloat2Int - Return bit-level equivalent of expression (int) f
@@ -291,7 +400,49 @@ unsigned floatScale2(unsigned uf)
  */
 int floatFloat2Int(unsigned uf)
 {
-  return 2;
+  // 2^31 stand for 2147483648 (MAX_INT + 1)
+  const int MAX_E = 0x9E;
+  const int ONE_E = 0x7F;
+  int s = uf >> 31 & 1;
+  int e = uf >> 23 & 0xFF;
+  int m = uf & 0x7FFFFF;
+  int M = (1 << 23) | m;
+  int res = 0;
+  // deal with uf > MAX_INT or uf <= MIN_INT
+  if (e >= MAX_E)
+  {
+    // return MIN_INT
+    return 0x80000000u;
+  }
+  // deal with -1 < uf < 1
+  if (e < ONE_E)
+  {
+      return 0;
+  }
+  // 127 + 23 = 150
+  // 23 stands for 23 bits significand
+  // 1.m * 2 ^ (e - 127) = (1 << 23 + m) >> 23 << (e - 127)
+  // if e - 127 > 23 (e > 150)
+  // 1.m * 2 ^ (e - 127) = M << (e - 150)
+  if (e < 150) 
+  {
+    // get absolute value
+    // right shift auto floor division
+    res = M >> (150 - e);
+  }
+  else
+  {
+    // accuate
+    res = M << (e - 150);
+  }
+  if (s == 0)
+  {
+    return res;
+  }
+  else
+  {
+    return -res;
+  }
 }
 /*
  * floatPower2 - Return bit-level equivalent of the expression 2.0^x
@@ -308,5 +459,23 @@ int floatFloat2Int(unsigned uf)
  */
 unsigned floatPower2(int x)
 {
-  return 2;
+  const unsigned int uint_INF = 0x7F800000;
+  if (x >= 128)
+  {
+    return uint_INF;
+  }
+  if (x < -149)
+  {
+    return 0u;
+  }
+  // normalized
+  if (x >= -126)
+  {
+    return (x + 127) << 23;
+  }
+  // de-normalized
+  else
+  {
+    return 1 << (x + 149);
+  }
 }
