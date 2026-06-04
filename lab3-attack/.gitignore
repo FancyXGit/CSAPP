@@ -2,3 +2,5 @@
 /input_*.txt
 /example.*
 /gdb.txt
+/rtarget.s
+/farm.s

