@@ -2,3 +2,4 @@
 /mdriver
 /mdriver.o
 /mm.o
+*.o
