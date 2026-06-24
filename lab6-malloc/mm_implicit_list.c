@@ -1,5 +1,5 @@
 /*
- * 分离显式空闲链表
+ * 隐式空闲链表
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,9 +25,6 @@ team_t team = {
     "",
     /* Second member's email address (leave blank if none) */
     ""};
-
-/* DEBUG */
-// #define DEBUG
 
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
@@ -60,40 +57,14 @@ team_t team = {
  * 哨兵只有头部
  */
 
-/*
- * 分离的显式空闲链表
- * 空闲块：块头8字节，前空闲块指针8字节，后空闲块指针8字节，脚部8字节
- * 占用块：块头8字节，块尾8字节
- * 块头包含：块大小，是否占用，前是否占用
- * 链表头数组放在堆起始位置，头哨兵节点之前
- * 大小类划分：共20组，160字节
- * 1. 小请求（32-512字节）：32字节一组，共15组：32-63, 64-95, 96-127...
- * 2. 中等请求（513-8192字节）：2的幂排列，共4组：512-1023, 1024-2047, 2048-4095, 4096-8191
- * 3. 大请求（>=8193字节）：1组：8192 - +inf
- * 显式空闲链表采用后进后出的策略，新节点插在链表头部
- * 指针一律指向链表头部
- *
- * 需要修改什么？
- * 1. 初始时，堆头先分配链表头数组空间
- * 2. 分配时，遍历空闲链表而不是整个堆
- * 3. 释放时，调整空闲链表结构
- */
-
 int mm_check(void);
 
-// 最小块大小
 #define MIN_BLOCK_SIZE 32
-// 链表头数组大小（元素数量不是字节数）
-#define LIST_ARRAY_SIZE 20
-// 指针大小
-#define PTR_SIZE sizeof(char *)
 
 /* 头哨兵头部 */
 static char *prologue_bp = NULL;
 /* 尾哨兵头部 */
 static char *epilogue_bp = NULL;
-/* 链表头数组 */
-static char **list_array = NULL;
 
 /* 掩码 */
 
@@ -112,40 +83,32 @@ static inline size_t PackHead(size_t block_size, int is_alloc)
     return block_size | (!!is_alloc);
 }
 
-static inline void WriteTail(char *bp);
-
 /*
  * 设置当前块的是否分配，即0位
- * 自动同步尾部
  */
 static inline void setAlloc(char *bp, int is_alloc)
 {
     *((size_t *)bp) &= ~ALLOC_MASK;
     *((size_t *)bp) |= !!is_alloc;
-    WriteTail(bp);
 }
 
 /*
  * 设置当前块的前一个块是否标记，即1位
- * 自动同步尾部
  */
 static inline void setPrevAlloc(char *bp, int is_prev_alloc)
 {
     *((size_t *)bp) &= ~PREV_ALLOC_MASK;
     *((size_t *)bp) |= !!is_prev_alloc << 1;
-    WriteTail(bp);
 }
 
 /*
  * 写入块头数据
  * bp为块头指针
  * val为要写入的值
- * 自动同步尾部
  */
 static inline void WriteHead(char *bp, size_t val)
 {
     *((size_t *)bp) = val;
-    WriteTail(bp);
 }
 
 /*
@@ -159,6 +122,8 @@ static inline size_t getSize(char *bp)
 
 /*
  * 写入块尾（自动取头复制到尾部）
+ * 调用前必须确定头部被正常写入
+ * 且该块是空闲的
  */
 static inline void WriteTail(char *bp)
 {
@@ -240,38 +205,6 @@ static inline char *getPrevBp(char *bp)
 }
 
 /*
- * 设置块中链表祖先Pred
- */
-static inline void setPred(char *bp, char *pred)
-{
-    *(char **)(bp + SIZE_T_SIZE) = pred;
-}
-
-/*
- * 设置块中链表后继Succ
- */
-static inline void setSucc(char *bp, char *succ)
-{
-    *(char **)(bp + 2 * SIZE_T_SIZE) = succ;
-}
-
-/*
- * 获得块中链表祖先Pred
- */
-static inline char *getPred(char *bp)
-{
-    return *(char **)(bp + SIZE_T_SIZE);
-}
-
-/*
- * 获得块中链表后继Succ
- */
-static inline char *getSucc(char *bp)
-{
-    return *(char **)(bp + 2 * SIZE_T_SIZE);
-}
-
-/*
  * 辅助函数：求最大值
  */
 static inline size_t max(size_t a, size_t b)
@@ -280,61 +213,16 @@ static inline size_t max(size_t a, size_t b)
 }
 
 /*
- * 辅助函数：求2为底的对数
- * 结果只取整数，例如输入3结果为1
- */
-static inline int int_log2(unsigned int a)
-{
-    return 31 - __builtin_clz(a);
-}
-
-/*
- * 对应块尺寸的数组索引
- * 0 - 14 对应 32-63, 64-95, 96-127...
- * 15 - 18 对应 512-1023, 1024-2047, 2048-4095, 4096-8191
- * 19对应 8192 - +inf
- */
-static inline int getSizeClass(size_t size)
-{
-    if (size < 512lu)
-    {
-        return (size - 32) / 32;
-    }
-    else if (size < 8192lu)
-    {
-        // 512- , 1024- , 2048-, 4096-
-        // 1-1 , 2-3 , 4-7 , 8-15
-        // 0 , 1 , 2 , 3
-        return int_log2(size / 512) + 15;
-    }
-    else
-    {
-        return 19;
-    }
-}
-
-/*
  * mm_init - initialize the malloc package.
  */
 int mm_init(void)
 {
-    // 两个部分：链表头数组，头尾哨兵
     int init_heap_size = 2 * SIZE_T_SIZE;
-    int list_array_size = LIST_ARRAY_SIZE * PTR_SIZE;
-    void *p = mem_sbrk(init_heap_size + list_array_size);
+    void *p = mem_sbrk(init_heap_size);
     if (p == (void *)-1)
     {
         return 1;
     }
-    p = (char *)p;
-    // 链表头数组
-    list_array = p;
-    for (int i = 0; i < LIST_ARRAY_SIZE; i++)
-    {
-        list_array[i] = NULL;
-    }
-    // 头尾节点
-    p += list_array_size;
     size_t head = PackHead(SIZE_T_SIZE, 1);
     prologue_bp = (char *)p;
     epilogue_bp = (char *)p + SIZE_T_SIZE;
@@ -353,164 +241,76 @@ int mm_init(void)
 }
 
 /*
- * 将一个空闲块从链表中删去
- */
-static inline void deleteFromList(char *bp)
-{
-    char *pred = getPred(bp);
-    char *succ = getSucc(bp);
-    int size = getSize(bp);
-    // 链表头单独处理
-    if (pred == NULL)
-    {
-        int size_index = getSizeClass(size);
-        if (succ == NULL)
-        {
-            // 链表中只有一个元素
-            list_array[size_index] = NULL;
-        }
-        else
-        {
-            // 将下一个元素设为链表头
-            list_array[size_index] = succ;
-            setPred(succ, NULL);
-        }
-        return;
-    }
-    // 链表中情况
-    // 这里包含了链表尾的情况，此时succ == NULL, pred的succ被设为了NULL
-    setSucc(pred, succ);
-    if (succ != NULL)
-    {
-        setPred(succ, pred);
-    }
-}
-
-/*
- * 添加一个新空闲的节点到链表头
- * 新空闲指分配的变成空闲的
- * 会根据块的大小自动添加到对应链表的头
- */
-static inline void addToList(char *bp)
-{
-    int size = getSize(bp);
-    int list_index = getSizeClass(size);
-    char *succ = list_array[list_index];
-    if (succ == NULL)
-    {
-        // 链表头为空，说明这个大小类链表还没有节点，设为链表头
-        setPred(bp, NULL);
-        setSucc(bp, NULL);
-        list_array[list_index] = bp;
-        return;
-    }
-    else
-    {
-        // 链表头不为空，设置为第一个节点
-        setPred(succ, bp);
-        setPred(bp, NULL);
-        setSucc(bp, succ);
-        list_array[list_index] = bp;
-        return;
-    }
-}
-
-/*
- * 返回最后一个有效块是否被占用
- */
-static inline int getLastBlockisAlloc(void)
-{
-    char *prev_foot = epilogue_bp - SIZE_T_SIZE;
-    return isAlloc(epilogue_bp - getSize(prev_foot));
-}
-
-/*
  * mm_malloc
- *     Always allocate a block whose size is a multiple of the alignment.
+ *     从头遍历的方式
  */
 void *mm_malloc(size_t size)
 {
-#ifdef DEBUG
     size_t arg1 = size;
-#endif
     // 向上取整到8字节
-    // 加上必须的头尾部空间
+    // 加上必须的头节点空间
     // 至少32字节大小
-    size_t need_size = max(32, ALIGN(size + 16));
-    // 链表头块
-    int class = getSizeClass(need_size);
-    for (int i = class; i < LIST_ARRAY_SIZE; i++)
+    size_t need_size = max(32, ALIGN(size + 8));
+    // 获取头哨兵的下一个块
+    char *curr_bp = prologue_bp;
+    // 最后一个有效块，为后面准备
+    char *final_bp = curr_bp;
+    while ((curr_bp = getNextBp(curr_bp)) != NULL)
     {
-        char *curr_bp = list_array[i];
-        // 遍历对应的空闲链表查找空闲块
-        while ((curr_bp != NULL))
+        // 跳过分配块
+        if (isAlloc(curr_bp))
         {
-            // 跳过空间不足的块
-            size_t curr_size = getSize(curr_bp);
-            if (curr_size < need_size)
-            {
-                curr_bp = getSucc(curr_bp);
-                continue;
-            }
-            // 找到足够的块
-            size_t left_size = curr_size - need_size;
-            if (left_size < MIN_BLOCK_SIZE)
-            {
-                // 没有足够的剩余空间建新块
-                // 直接使用整块
-                // 将当前块设为占用
-                setAlloc(curr_bp, 1);
-                // 从空闲链表里面删去
-                deleteFromList(curr_bp);
-                // 将下一个块设为占用
-                char *next_bp = getNextBp(curr_bp);
-                if (next_bp != NULL)
-                {
-                    setPrevAlloc(next_bp, 1);
-                }
-                // 返回数据指针
-#ifdef DEBUG
-                if (mm_check() == -1)
-                {
-                    printf("正在执行函数mm_malloc(size_t size = %zd)\n", arg1);
-                }
-#endif
-                return bp2ptr(curr_bp);
-            }
-            else
-            {
-                // 从链表中删除大的空闲块
-                deleteFromList(curr_bp);
-                // 保存之前块的占用信息
-                int is_prev_alloc = isPrevAlloc(curr_bp);
-                // 分裂成两个块
-                size_t head_1 = PackHead(need_size, 1);
-                size_t head_2 = PackHead(left_size, 0);
-                // 写前一个块的头尾
-                WriteHead(curr_bp, head_1);
-                setPrevAlloc(curr_bp, is_prev_alloc);
-                // 写后一个块的头尾
-                char *bp_2 = getNextBp(curr_bp);
-                WriteHead(bp_2, head_2);
-                setPrevAlloc(bp_2, 1);
-                // 将后一个块加入链表中
-                addToList(bp_2);
-                // 由于原本就是空闲的，所以下一个块的isPrevAlloc不需要写
-                // 返回数据指针
-#ifdef DEBUG
-                if (mm_check() == -1)
-                {
-                    printf("正在执行函数mm_malloc(size_t size = %zd)\n", arg1);
-                }
-#endif
-                return bp2ptr(curr_bp);
-            }
+            final_bp = curr_bp;
+            continue;
         }
+        // 跳过空间不足的块
+        size_t curr_size = getSize(curr_bp);
+        if (curr_size < need_size)
+        {
+            final_bp = curr_bp;
+            continue;
+        }
+        // 找到足够的块
+        size_t left_size = curr_size - need_size;
+        if (left_size < MIN_BLOCK_SIZE)
+        {
+            // 没有足够的剩余空间建新块
+            // 直接使用整块
+            // 将当前块设为占用
+            setAlloc(curr_bp, 1);
+            // 将下一个块设为占用
+            char *next_bp = getNextBp(curr_bp);
+            if (next_bp != NULL)
+            {
+                setPrevAlloc(next_bp, 1);
+            }
+            // 返回数据指针
+            return bp2ptr(curr_bp);
+        }
+        else
+        {
+            // 保存之前块的占用信息
+            int is_prev_alloc = isPrevAlloc(curr_bp);
+            // 分裂成两个块
+            size_t head_1 = PackHead(need_size, 1);
+            size_t head_2 = PackHead(left_size, 0);
+            // 写前一个块的头
+            WriteHead(curr_bp, head_1);
+            setPrevAlloc(curr_bp, is_prev_alloc);
+            // 写后一个块的头尾
+            char *bp_2 = getNextBp(curr_bp);
+            WriteHead(bp_2, head_2);
+            setPrevAlloc(bp_2, 1);
+            WriteTail(bp_2);
+            // 由于原本就是空闲的，所以下一个块的isPrevAlloc不需要写
+            // 返回数据指针
+            return bp2ptr(curr_bp);
+        }
+        // 下一个块
+        final_bp = curr_bp;
     }
-
     // 找不到空闲的块
     // 增大堆空间
-
     void *p = mem_sbrk(need_size);
     if (p == (void *)-1)
     {
@@ -519,9 +319,9 @@ void *mm_malloc(size_t size)
     }
     // 替换原来的堆顶，即尾哨兵
     size_t head = PackHead(need_size, 1);
-    char *curr_bp = epilogue_bp;
+    curr_bp = epilogue_bp;
     WriteHead(curr_bp, head);
-    if (getLastBlockisAlloc())
+    if (isAlloc(final_bp))
     {
         setPrevAlloc(curr_bp, 1);
     }
@@ -546,7 +346,6 @@ void *mm_malloc(size_t size)
  * 会自动设置合并完成后的下一个块的isPrevAlloc
  * 注意只有发生合并才会设置isPrevAlloc
  * bp: 当前空闲块头指针
- * 只会讲后面的块从链表中删掉
  */
 static void CombineLatter(char *bp)
 {
@@ -565,12 +364,11 @@ static void CombineLatter(char *bp)
     }
     // 保存前一个块是否占用的信息
     int is_prev_alloc = isPrevAlloc(curr_bp);
-    // 从空闲链表中删除下一个块
-    deleteFromList(next_bp);
     // 执行合并操作
     size_t sum_size = getSize(curr_bp) + getSize(next_bp);
     WriteHead(curr_bp, PackHead(sum_size, 0));
     setPrevAlloc(curr_bp, is_prev_alloc);
+    WriteTail(curr_bp);
     // 获取合并之后的下一个块，并设置之前未分配
     next_bp = getNextBp(curr_bp);
     // 没有下一个块：终止
@@ -587,10 +385,8 @@ static void CombineLatter(char *bp)
 /*
  * 递归合并前面所有空闲块
  * 如果前面的块被占用，则终止
- * 返回最后合并的块头
- * 从空闲链表中删除前面的所有块
  */
-static char *CombineFormer(char *bp)
+static void CombineFormer(char *bp)
 {
     char *curr_bp = bp;
     char *prev_bp = getPrevBp(bp);
@@ -600,27 +396,24 @@ static char *CombineFormer(char *bp)
     if (prev_bp == NULL)
     {
         setPrevAlloc(curr_bp, 1);
-        return curr_bp;
+        return;
     }
-    // 从空闲链表中删除前一个块
-    deleteFromList(prev_bp);
     // 合并操作
     int is_prev_alloc = isPrevAlloc(prev_bp);
     size_t sum_size = getSize(curr_bp) + getSize(prev_bp);
     WriteHead(prev_bp, PackHead(sum_size, 0));
     setPrevAlloc(prev_bp, is_prev_alloc);
+    WriteTail(prev_bp);
     // 递归
-    return CombineFormer(prev_bp);
+    CombineFormer(prev_bp);
 }
 
 /*
- * mm_free - Freeing a block does nothing.
+ * mm_free - 立即递归合并的方式
  */
 void mm_free(void *ptr)
 {
-#ifdef DEBUG
     void *arg1 = ptr;
-#endif
     // 处理空指针
     if (ptr == NULL)
     {
@@ -630,6 +423,7 @@ void mm_free(void *ptr)
     char *curr_bp = ptr2bp((char *)ptr);
     // 设置当前与之后两个块的状态
     setAlloc(curr_bp, 0);
+    WriteTail(curr_bp);
     char *next_bp = getNextBp(curr_bp);
     if (next_bp != NULL)
         setPrevAlloc(next_bp, 0);
@@ -637,9 +431,7 @@ void mm_free(void *ptr)
         setPrevAlloc(epilogue_bp, 0);
     // 递归合并前后相邻空闲块
     CombineLatter(curr_bp);
-    char *bp = CombineFormer(curr_bp);
-    // 加入空闲链表
-    addToList(bp);
+    CombineFormer(curr_bp);
 #ifdef DEBUG
     if (mm_check() == -1)
     {
@@ -649,7 +441,8 @@ void mm_free(void *ptr)
 }
 
 /*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
+ * mm_realloc - 如果空间够大则直接返回
+ * 如果空间不够会尝试切割下一个空闲块来合并返回
  */
 void *mm_realloc(void *ptr, size_t size)
 {
@@ -665,7 +458,7 @@ void *mm_realloc(void *ptr, size_t size)
         return NULL;
     }
     char *curr_bp = ptr2bp(ptr);
-    size_t need_size = max(32, ALIGN(size + 16));
+    size_t need_size = max(32, ALIGN(size + 8));
     size_t curr_size = getSize(curr_bp);
     // 需要大小更小，无需改动
     if (need_size <= curr_size)
@@ -685,15 +478,11 @@ void *mm_realloc(void *ptr, size_t size)
             size_t left_size = new_size - need_size;
             if (left_size >= MIN_BLOCK_SIZE)
             {
-                // 删除被占用块
-                // 这里一个隐藏的BUG，如果这个deleteFromList没有提前，如果next_next_bp在next_bp的8-16字节之后，就会覆盖指针导致错误
-                deleteFromList(next_bp);
                 // 大小足够，执行分裂
                 char *next_next_bp = curr_bp + need_size;
                 WriteHead(next_next_bp, PackHead(left_size, 0));
                 setPrevAlloc(next_next_bp, 1);
-                // 添加到空闲链表中
-                addToList(next_next_bp);
+                WriteTail(next_next_bp);
                 // 设置头
                 int is_prev_alloc = isPrevAlloc(curr_bp);
                 WriteHead(curr_bp, PackHead(need_size, 1));
@@ -703,9 +492,6 @@ void *mm_realloc(void *ptr, size_t size)
             else
             {
                 // 整段合并
-                // 先删除空闲块
-                deleteFromList(next_bp);
-                // 合并
                 int is_prev_alloc = isPrevAlloc(curr_bp);
                 WriteHead(curr_bp, PackHead(new_size, 1));
                 setPrevAlloc(curr_bp, is_prev_alloc);
@@ -754,82 +540,15 @@ static inline size_t getTail(char *bp)
 static inline void PrintBlockInfo(char *prev_bp, char *curr_bp)
 {
     printf("前一个块信息：地址: %p, 大小: %d, 分配: %d, 前面是否分配:%d\n", prev_bp, getSize(prev_bp), isAlloc(prev_bp), isPrevAlloc(prev_bp));
-    if (!isAlloc(prev_bp))
-    {
-        printf("前一个块是空闲块, 祖先指针 %p, 后继指针 %p\n", getPred(prev_bp), getSucc(prev_bp));
-        size_t size = getSize(prev_bp);
-        int class = getSizeClass(size);
-        printf("大小 %zd, 对应链表头数组索引 %d, 链表头 %p\n", size, class, list_array[class]);
-    }
     printf("当前块信息：地址: %p, 大小: %d, 分配: %d, 前面是否分配:%d\n", curr_bp, getSize(curr_bp), isAlloc(curr_bp), isPrevAlloc(curr_bp));
-    if (!isAlloc(curr_bp))
-    {
-        printf("当前块是空闲块, 祖先指针 %p, 后继指针 %p\n", getPred(curr_bp), getSucc(curr_bp));
-        size_t size = getSize(curr_bp);
-        int class = getSizeClass(size);
-        printf("大小 %zd, 对应链表头数组索引 %d, 链表头 %p\n", size, class, list_array[class]);
-    }
     printf("当前堆头哨兵地址: %p , 尾哨兵地址 %p\n", prologue_bp, epilogue_bp);
     printf("仅返回最近的一次错误\n");
-}
-
-/*
- * 打印单个块的信息
- */
-static inline void PrintSigBlockInfo(char *curr_bp)
-{
-    printf("当前块信息：地址: %p, 大小: %d, 分配: %d, 前面是否分配:%d\n", curr_bp, getSize(curr_bp), isAlloc(curr_bp), isPrevAlloc(curr_bp));
-    if (!isAlloc(curr_bp))
-    {
-        printf("当前块是空闲块, 祖先指针 %p, 后继指针 %p\n", getPred(curr_bp), getSucc(curr_bp));
-        size_t size = getSize(curr_bp);
-        int class = getSizeClass(size);
-        printf("大小 %zd, 对应链表头数组索引 %d, 链表头 %p\n", size, class, list_array[class]);
-    }
-    printf("当前堆头哨兵地址: %p , 尾哨兵地址 %p\n", prologue_bp, epilogue_bp);
-    printf("仅返回最近的一次错误\n");
-}
-
-/*
- * 检测单向链表是否成环
- * head : 链表头节点指针
- * 返回值: 1 表示有环, 0 表示无环
- * 前提: 链表中节点地址都不相同（没有人为重复插入同一个块）
- */
-static int hasCycle(void *head)
-{
-    if (head == NULL)
-        return 0;
-
-    void *slow = head;
-    void *fast = head;
-
-    while (fast != NULL && getSucc(fast) != NULL)
-    {
-        slow = getSucc(slow);          // 慢指针走一步
-        fast = getSucc(getSucc(fast)); // 快指针走两步
-
-        if (slow == fast)
-        {
-            return 1; // 相遇，说明有环
-        }
-    }
-    return 0; // 正常走到末尾，无环
 }
 
 int mm_check(void)
 {
     char *prev_bp = prologue_bp;
     char *curr_bp = prologue_bp;
-    // 检测链表是否成环
-    for (int i = 0; i < LIST_ARRAY_SIZE; i++)
-    {
-        if (hasCycle(list_array[i]))
-        {
-            printf("\n空闲链表成环！对应索引%d\n", i);
-            return -1;
-        }
-    }
     // 遍历检查全部堆块
     while ((curr_bp = getNextBp(curr_bp)) != NULL)
     {
@@ -849,43 +568,15 @@ int mm_check(void)
             PrintBlockInfo(prev_bp, curr_bp);
             return -1;
         }
-        // 检查所有块头尾块是否一致正确
+        // 检查空闲块头尾块是否一致正确
+        if (!isAlloc(curr_bp))
         {
             size_t head = getHead(curr_bp);
             size_t tail = getTail(curr_bp);
             if (head != tail)
             {
-                printf("\n错误！位于%p的块头和块尾不一致,块头为%#zx,块尾为%#zx,不匹配！\n", curr_bp, head, tail);
+                printf("\n错误！位于%p的空闲块块头和块尾不一致,块头为%#zx,块尾为%#zx,不匹配！\n", curr_bp, head, tail);
                 PrintBlockInfo(prev_bp, curr_bp);
-                return -1;
-            }
-        }
-        // 检查空闲块是否在链表之中
-        if (!isAlloc(curr_bp))
-        {
-            int size = getSize(curr_bp);
-            int class = getSizeClass(size);
-            char *list_bp = list_array[class];
-            if (list_bp == NULL)
-            {
-                printf("\n空闲块所在的链表为空！\n");
-                PrintSigBlockInfo(curr_bp);
-                return -1;
-            }
-
-            int contains = 0;
-            while (list_bp != NULL)
-            {
-                if (list_bp == curr_bp)
-                {
-                    contains = 1;
-                }
-                list_bp = getSucc(list_bp);
-            }
-            if (contains == 0)
-            {
-                printf("\n空闲块未处于对应链表之中！\n");
-                PrintSigBlockInfo(curr_bp);
                 return -1;
             }
         }
@@ -902,43 +593,6 @@ int mm_check(void)
         }
         // 一轮检查结束，递增prev_bp
         prev_bp = curr_bp;
-    }
-    // 检查每个空闲链表
-    for (int i = 0; i < LIST_ARRAY_SIZE; i++)
-    {
-        curr_bp = list_array[i];
-        while (curr_bp != NULL)
-        {
-            // 检查空闲链表中的块是否为空闲
-            if (isAlloc(curr_bp))
-            {
-                printf("\n错误！空闲链表中的块是被占用的, 块地址 %p\n ", curr_bp);
-                PrintSigBlockInfo(curr_bp);
-                return -1;
-            }
-            // 检查空闲链表的指针指向
-            char *pred = getPred(curr_bp);
-            char *succ = getSucc(curr_bp);
-            if (pred != NULL)
-            {
-                if (isAlloc(pred))
-                {
-                    printf("\n错误！空闲块 %p 前驱指针为 %p 指向的块是占用块！\n", curr_bp, pred);
-                    PrintBlockInfo(pred, curr_bp);
-                    return -1;
-                }
-            }
-            if (succ != NULL)
-            {
-                if (isAlloc(succ))
-                {
-                    printf("\n错误！空闲块 %p 后驱指针为 %p 指向的块是占用块！\n", curr_bp, succ);
-                    PrintBlockInfo(succ, curr_bp);
-                    return -1;
-                }
-            }
-            curr_bp = getSucc(curr_bp);
-        }
     }
     return 1;
 }
