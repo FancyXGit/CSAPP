@@ -1,10 +1,8 @@
 #include "csapp.h"
 #include "sbuf.h"
+#include "cache.h"
 #include <netdb.h>
 
-/* Recommended max cache and object sizes */
-#define MAX_CACHE_SIZE 1049000
-#define MAX_OBJECT_SIZE 102400
 #define MAX_STR_LENGTH 64
 #define NTHREADS 4
 #define SBUFSIZE 16
@@ -377,6 +375,16 @@ void modifyResponse(char *response)
     }
 }
 
+static void getCacheURL(const char* httpHead, char *res)
+{
+    char* blank1 = strchr(httpHead, ' ');
+    blank1++;
+    char *blank2 = strchr(blank1, ' ');
+    int size = blank2 - blank1;
+    memcpy(res, blank1, size + 1);
+    res[size] = '\0';
+}
+
 /*
  * 提供代理服务
  * 不会关闭connfd
@@ -411,6 +419,22 @@ void Service(int connfd)
     {
         goto srv_exit1;
     }
+
+    // 解析缓存URL
+    char url[64];
+    char *cache_data;
+    size_t cache_len;
+    getCacheURL(res[0], url);
+    // 查找缓存
+    int cache_res = getCache(url, &cache_data, &cache_len);
+    if (cache_res == 0)
+    {
+        // 缓存命中，直接返回
+        rio_writen(connfd, cache_data, cache_len);
+        goto srv_exit1;
+    }
+
+    // 缓存未命中
     // 解析请求首行
     char *host = ModifyStartLine(res[0], strlen(res[0])); // 得到的res每个字符串都有\r\n\0结尾
     if (host == NULL)
@@ -419,6 +443,7 @@ void Service(int connfd)
     }
     // 将请求排序并且依次复制到buf缓存区
     int req_size = CombineHttp(buf, res, count, host);
+
     // 提取host中的主机与域名
     char host_name[128];
     char port[16];
@@ -434,6 +459,14 @@ void Service(int connfd)
     rio_writen(clientfd, buf, req_size);
 
     // 接受请求
+    cache_data = malloc(sizeof(char) * MAX_OBJECT_SIZE);
+    if (cache_data == NULL)
+    {
+        goto srv_exit3;
+        return;
+    }
+    char *cache_data_ptr = cache_data;
+    ssize_t cache_data_len = 0;
     ssize_t n;
     while ((n = rio_readnb(&rio_server, buf, MAXLINE)) != 0)
     {
@@ -441,8 +474,15 @@ void Service(int connfd)
         // modifyResponse(buf);
         // 发送
         rio_writen(connfd, buf, n);
+        cache_data_len += n;
+        memcpy(cache_data_ptr, buf, n);
+        cache_data_ptr += n;
     }
+    // 存入缓存
+    writeCache(url, cache_data, cache_data_len);
+    free(cache_data);
 
+srv_exit3:
     close(clientfd);
 srv_exit2:
     free(host);
@@ -458,6 +498,9 @@ srv_exit1:
 void *thread(void *vargp)
 {
     Pthread_detach(pthread_self());
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, CacheInit);
+
     while (1)
     {
         int connfd = sbuf_remove(&sbuf);
