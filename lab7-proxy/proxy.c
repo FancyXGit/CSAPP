@@ -1,15 +1,20 @@
 #include "csapp.h"
+#include "sbuf.h"
 #include <netdb.h>
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 #define MAX_STR_LENGTH 64
+#define NTHREADS 4
+#define SBUFSIZE 16
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 static const char *connection_hdr = "Connection: close\r\n";
 static const char *proxy_connection = "Proxy-Connection: close\r\n";
+
+sbuf_t sbuf;
 
 /*
  * 按\r\n分割HTTP请求字符串
@@ -353,6 +358,7 @@ void getHostNamePort(char *host, int host_len, char *host_name, char *port)
 /*
  * 修改响应
  * 将Connection: keep-alive修改为Connection: close
+ * 这个函数不必要
  */
 void modifyResponse(char *response)
 {
@@ -371,9 +377,12 @@ void modifyResponse(char *response)
     }
 }
 
+/*
+ * 提供代理服务
+ * 不会关闭connfd
+ */
 void Service(int connfd)
 {
-    size_t n;
     char buf[MAXLINE];
     rio_t rio_client;
     rio_t rio_server;
@@ -385,27 +394,28 @@ void Service(int connfd)
     while (1)
     {
         char line[MAXLINE];
-        Rio_readlineb(&rio_client, line, MAXLINE);
+        if (rio_readlineb(&rio_client, line, MAXLINE) <= 0)
+        {
+            break;
+        }
         strcat(buf, line);
         if (strcmp(line, "\r\n") == 0)
+        {
             break; // 空行 = 请求头结束
+        }
     }
     // 分割请求行
     char *res[64];
     int count = SplitHttpLines(buf, res, 64);
     if (count <= 0)
     {
-        Close(connfd);
-        FreeLines(res, count);
-        return;
+        goto srv_exit1;
     }
     // 解析请求首行
     char *host = ModifyStartLine(res[0], strlen(res[0])); // 得到的res每个字符串都有\r\n\0结尾
     if (host == NULL)
     {
-        Close(connfd);
-        FreeLines(res, count);
-        return;
+        goto srv_exit1;
     }
     // 将请求排序并且依次复制到buf缓存区
     int req_size = CombineHttp(buf, res, count, host);
@@ -415,23 +425,45 @@ void Service(int connfd)
     getHostNamePort(host, strlen(host), host_name, port);
 
     // 发送请求
-    int clientfd = Open_clientfd(host_name, port);
-    Rio_readinitb(&rio_server, clientfd);
-    Rio_writen(clientfd, buf, req_size);
+    int clientfd = open_clientfd(host_name, port);
+    if (clientfd < 0)
+    {
+        goto srv_exit2;
+    }
+    rio_readinitb(&rio_server, clientfd);
+    rio_writen(clientfd, buf, req_size);
 
     // 接受请求
-    while ((n = Rio_readnb(&rio_server, buf, MAXLINE)) != 0)
+    ssize_t n;
+    while ((n = rio_readnb(&rio_server, buf, MAXLINE)) != 0)
     {
         // 修改收到的请求
         // modifyResponse(buf);
-
         // 发送
-        Rio_writen(connfd, buf, n);
+        rio_writen(connfd, buf, n);
     }
-    Close(clientfd);
+
+    close(clientfd);
+srv_exit2:
     free(host);
+srv_exit1:
     FreeLines(res, count);
-    Close(connfd);
+}
+
+/*
+ * 线程函数，传入vargp == NULL
+ * 从connfd队列中取出
+ * sbuf保证加锁
+ */
+void *thread(void *vargp)
+{
+    Pthread_detach(pthread_self());
+    while (1)
+    {
+        int connfd = sbuf_remove(&sbuf);
+        Service(connfd);
+        close(connfd);
+    }
 }
 
 int main(int argc, char *argv[])
@@ -448,14 +480,28 @@ int main(int argc, char *argv[])
     struct sockaddr_storage clientaddr;
     char client_hostname[MAX_STR_LENGTH];
     char client_port[MAX_STR_LENGTH];
+    pthread_t tid;
+
+    sbuf_init(&sbuf, SBUFSIZE);
+    for (int i = 0; i < NTHREADS; i++)
+    {
+        Pthread_create(&tid, NULL, thread, NULL);
+    }
 
     while (1)
     {
         clientlen = sizeof(struct sockaddr_storage);
-        connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
-        Getnameinfo((SA *)&clientaddr, clientlen, client_hostname, MAX_STR_LENGTH, client_port, MAX_STR_LENGTH, NI_NUMERICHOST | NI_NUMERICSERV);
+        connfd = accept(listenfd, (SA *)&clientaddr, &clientlen);
+        if (connfd < 0)
+        {
+            continue;
+        }
+        if (getnameinfo((SA *)&clientaddr, clientlen, client_hostname, MAX_STR_LENGTH, client_port, MAX_STR_LENGTH, NI_NUMERICHOST | NI_NUMERICSERV) != 0)
+        {
+            continue;
+        }
         printf("连接到 (%s, %s)\n", client_hostname, client_port);
-        Service(connfd);
+        sbuf_insert(&sbuf, connfd);
     }
     return 0;
 }
